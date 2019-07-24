@@ -5,6 +5,7 @@
 #include <avr/eeprom.h>
 #include <u8g2.h>
 #include <util/delay.h>
+#include <util/atomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -13,50 +14,93 @@
 
 #define DISPLAY_CLK_DIR DDRA
 #define DISPLAY_CLK_PORT PORTA
-#define DISPLAY_CLK_PIN 4
+#define DISPLAY_CLK_PIN 0
 
 #define DISPLAY_DATA_DIR DDRA
 #define DISPLAY_DATA_PORT PORTA
-#define DISPLAY_DATA_PIN 3
-
-#define DISPLAY_CS_DIR DDRA
-#define DISPLAY_CS_PORT PORTA
-#define DISPLAY_CS_PIN 0
-
-#define DISPLAY_DC_DIR DDRA
-#define DISPLAY_DC_PORT PORTA
-#define DISPLAY_DC_PIN 1
+#define DISPLAY_DATA_PIN 1
 
 #define DISPLAY_RESET_DIR DDRA
 #define DISPLAY_RESET_PORT PORTA
 #define DISPLAY_RESET_PIN 2
+
+#define DISPLAY_DC_DIR DDRA
+#define DISPLAY_DC_PORT PORTA
+#define DISPLAY_DC_PIN 3
+
+#define DISPLAY_CS_DIR DDRA
+#define DISPLAY_CS_PORT PORTA
+#define DISPLAY_CS_PIN 4
 
 #define P_CPU_NS (1000000000UL / F_CPU)
 
 #define BUTTONS_PORT PORTD
 #define BUTTONS_DDR DDRD
 #define BUTTONS_PIN PIND
-#define BUTTON_RU 1
-#define BUTTON_LU 2
-#define BUTTON_LD 3
-#define BUTTON_RD 4
+#define BUTTON_FIRST 2
+#define BUTTON_RU 2
+#define BUTTON_RD 3
+#define BUTTON_LD 4
+#define BUTTON_LU 5
+#define BUTTON_LAST 5
 
 #define LEVEL_DDR DDRC
 #define LEVEL_PORT PORTC
-#define LEVEL_PIN 2
+#define LEVEL_PIN 1
 #define LEVEL_VALUE PINC & (1<<LEVEL_PIN)
 
 #define GEAR_PORT PORTC
 #define GEAR_DDR DDRC
-#define GEAR_HEATER_PIN 0
-#define GEAR_FAN_PIN 1
+#define GEAR_HEATER_PIN 2
+#define GEAR_FAN_PIN 0
+
+#define USART_BAUDRATE 9600
+#define UBRR_VALUE (((F_CPU / (USART_BAUDRATE * 16UL))) - 1)
+#define USART_CAN_READ (UCSRA & (1<<RXC))
+#define BT_BUFFER_SIZE 8
 
 u8g2_t u8g2;
 float EEMEM destTemperatureEEMEM = 24;
+
+uint8_t EEMEM destHoursEEMEM = 4;
+uint8_t EEMEM destMinutesEEMEM = 0;
+uint8_t EEMEM destSecontsEEMEM = 0;
 unsigned char hours = 0;
 unsigned char minutes = 0;
 unsigned char seconds = 0;
 
+uint8_t buttonsCounters[BUTTON_LAST+1] = {0};
+
+// The inputted commands are never going to be
+// more than 8 chars long. Volatile for the ISR.
+volatile unsigned char data_in[8];
+volatile unsigned char command_in[8];
+
+volatile unsigned char data_count;
+volatile unsigned char command_ready;
+
+
+void USART_Init(void) //Функция инициализации USART
+{
+	UBRRH = (uint8_t) (UBRR_VALUE>>8); // Set baudrate
+	UBRRL = (uint8_t) UBRR_VALUE;
+	UCSRB = (1<<RXEN) | (1<<TXEN) | (1<<RXCIE); //Разрешение на прием и передачу через USART
+	UCSRC = (1<<URSEL) | (0<<USBS) | (3<<UCSZ0); // Set frame format to 8 data bits, no parity, 1 stop bit
+}
+#define USART_READ UDR 
+
+void USART_Transmit( unsigned char data ) //Функция отправки данных
+{
+	while ( !(UCSRA & (1<<UDRE)) ); //Ожидание опустошения буфера приема
+	UDR = data; //Начало передачи данных
+}unsigned char USART_Read(void){	while( !USART_CAN_READ );	return USART_READ;}void copy_command ()
+{
+	// The USART might interrupt this - don't let that happen!
+	ATOMIC_BLOCK(ATOMIC_FORCEON) {
+		// Copy the contents of data_in into command_in
+		for (int i=0; i<7; i++) command_in[i] = data_in[i];
+	}
+}
 uint8_t u8x8_avr_delay(u8x8_t *u8x8, uint8_t msg, uint8_t arg_int, void *arg_ptr)
 {
 	uint8_t cycles;
@@ -152,28 +196,49 @@ uint8_t u8x8_avr_gpio_and_delay(u8x8_t *u8x8, uint8_t msg, uint8_t arg_int, void
 }
 
 ISR(TIMER1_OVF_vect)
-{
-	seconds++;
+{	
+	if(seconds > 0){
+		seconds--;
+	}else{
+		seconds = 59;
+		if(minutes > 0){
+			minutes--;
+		}else{
+			minutes = 59;
+			if(hours > 0) hours -= 1;
+		}
+	}
+	eeprom_update_byte(&destSecontsEEMEM, seconds);
+	eeprom_update_byte(&destMinutesEEMEM, minutes);
+	eeprom_update_byte(&destHoursEEMEM, hours);
 	
-	if(seconds == 60)
-	{
-		seconds = 0;
-		minutes++;
-	}
-	if(minutes == 60)
-	{
-		minutes = 0;
-		hours++;
-	}
-	if(hours > 23)
-		hours = 0;
 	TCNT1 = 53817;
+}
+
+ISR(USART_RXC_vect)
+{
+	if (command_ready) return;
+	// Get data from the USART in register
+	data_in[data_count] = UDR;
+
+	// End of line!
+	if (data_count > 7 || data_in[data_count] == '\n') {
+		command_ready = 1;
+		// Reset to 0, ready to go again
+		data_count = 0;
+	} else {
+		data_count++;
+	}
 }
 
 
 int main(void)
 {	
-	float temperature;
+	uint8_t sensorFault = -1;
+	float temperature = 0;
+	uint8_t temperatureUpdateTime = 0;
+	float temperatureJumpInterval;
+	uint8_t timeJumpInterval;
 	float destTemperature = eeprom_read_float(&destTemperatureEEMEM);
 	
 	uint8_t heater = 0;
@@ -183,10 +248,16 @@ int main(void)
 	char strDestTemperature[5] = {0};
 	char strTime[6] = {0};
 	
+	seconds = eeprom_read_byte(&destSecontsEEMEM);
+	minutes = eeprom_read_byte(&destMinutesEEMEM);
+	hours   = eeprom_read_byte(&destHoursEEMEM);
+	
 	TCCR1B |= (1<<CS12)|(1<<CS10);//Предделитель = 1024
 	TIMSK |= (1<<TOIE1);//Разрешить прерывание по переполнению таймера 1
 	TCNT1 = 53817;
 	sei();
+	
+	USART_Init();
 
 	BUTTONS_PORT |= (1<<BUTTON_LU)|(1<<BUTTON_RU)|(1<<BUTTON_LD)|(1<<BUTTON_RD);
 	BUTTONS_DDR  &= ~((1<<BUTTON_LU)|(1<<BUTTON_RU)|(1<<BUTTON_LD)|(1<<BUTTON_RD));
@@ -207,48 +278,124 @@ int main(void)
 		4. Arg: Defined in this code itself (see above)
 	*/
 	u8g2_Setup_ssd1306_128x64_noname_2( &u8g2, U8G2_R0, u8x8_byte_4wire_sw_spi, u8x8_avr_gpio_and_delay );
-	
 	u8g2_InitDisplay(&u8g2);
 	u8g2_SetPowerSave(&u8g2, 0);
+	u8g2_SetDisplayRotation(&u8g2, U8G2_R2);
 	DISPLAY_CS_PORT |= (1<<DISPLAY_CS_PIN);	
 	max31865_setup();
 		
 	while(1){
-		temperature = max31865_temperature();
-		if( temperature > 0 ){
+		if (command_ready == 1) {
+			copy_command();
+			command_ready = 0;
+			if( command_in[0] == 'S' ){
+				if( command_in[1] == 'T' ){
+					destTemperature = (float)(command_in[2] - '0')*10;
+					destTemperature += (command_in[3] - '0');
+					destTemperature += (float)(command_in[5] - '0')/10;
+				}else if ( command_in[1] == 'S' ){
+					hours   = (command_in[2] - '0')*10 + (command_in[3] - '0');
+					minutes = (command_in[5] - '0')*10 + (command_in[6] - '0');
+				}
+			}
+		}
+		/* _delay_us(500);
+		USART_Transmit('A');
+		USART_Transmit('T');
+		USART_Transmit('+');
+		USART_Transmit('N');
+		USART_Transmit('A');
+		USART_Transmit('M');
+		USART_Transmit('E');
+		USART_Transmit('S');
+		USART_Transmit('o');
+		USART_Transmit('u');
+		USART_Transmit('s');
+		USART_Transmit('v');
+		USART_Transmit('i');
+		USART_Transmit('d');
+		USART_Transmit('e');
+		USART_Transmit(13);
+		_delay_us(500); */
+		
+		if( seconds != temperatureUpdateTime ){
+			sensorFault = max31865_readFault();
+			temperature = max31865_temperature();
+			temperatureUpdateTime = seconds;
+		}
+		if( sensorFault ){
+			strcpy(strTemperature, "---");
+		}else if( temperature > 0 ){
 			dtostrf(temperature, 4, 1, strTemperature);
 		}else{
-			strcpy(strTemperature, "000");	
+			strcpy(strTemperature, "000");
 		}
+		for(uint8_t i = 0; i <= 3; i++) USART_Transmit(strTemperature[i]);
+		USART_Transmit(20);
 		
-		if( (BUTTONS_PIN & (1<<BUTTON_RU)) == 0 ){
-			destTemperature += .1;
+		for(uint8_t i = BUTTON_FIRST; i <= BUTTON_LAST; i++){
+			buttonsCounters[i] = (BUTTONS_PIN & (1<<i)) == 0 
+				? (buttonsCounters[i] < 255 ? buttonsCounters[i]+1 : 255) 
+				: 0;
+		}
+		if( buttonsCounters[BUTTON_RU] > 0 ){
+			temperatureJumpInterval = buttonsCounters[BUTTON_RU] > 4 
+				? ( buttonsCounters[BUTTON_RU] > 8 ? 5 : 1) 
+				: .1;
+			destTemperature = round(destTemperature / temperatureJumpInterval + 1)*temperatureJumpInterval;
 			if( destTemperature > 99 ) destTemperature = 99;
 			eeprom_update_float(&destTemperatureEEMEM, destTemperature);
 		}
-		if( (BUTTONS_PIN & (1<<BUTTON_RD)) == 0 ){
-			destTemperature -= .1;
+		if( buttonsCounters[BUTTON_RD] > 0 ){
+			temperatureJumpInterval = buttonsCounters[BUTTON_RD] > 4
+				? ( buttonsCounters[BUTTON_RD] > 8 ? 5 : 1)
+				: .1;
+			destTemperature = round(destTemperature / temperatureJumpInterval - 1 )*temperatureJumpInterval;
 			if( destTemperature < 10 ) destTemperature = 10;
 			eeprom_update_float(&destTemperatureEEMEM, destTemperature);
 		}
 		heater = destTemperature > temperature ? 1 : 0;
+
+		if( buttonsCounters[BUTTON_LU] > 0 ){
+			minutes += buttonsCounters[BUTTON_LU] > 4 ? 30 : 10;
+			if( minutes > 60 ){
+				minutes -=60;
+				hours += 1;
+				if( hours > 99 ) hours = 99;	
+			}
+		}
+		if( buttonsCounters[BUTTON_LD] > 0 ){
+			timeJumpInterval = buttonsCounters[BUTTON_LD] > 4 ? 30 : 10;
+			if( minutes >= timeJumpInterval ){
+				minutes -= timeJumpInterval;
+			}else{
+				if( hours > 0 ){
+					minutes += 60 - timeJumpInterval;
+					hours -= 1;
+				}else{
+					minutes = 0;
+				}
+			}
+		}
 		
-		level = (BUTTONS_PIN & (1<<BUTTON_LD)) == 0;
-		if( level ){//LEVEL_VALUE == 0 ){
+		level = LEVEL_VALUE;
+		if( level ){
+			fan = 1;
+			GEAR_PORT |= (1<<GEAR_FAN_PIN);
+		}else{
 			heater = 0;
 			fan = 0;
 			GEAR_PORT &= ~(1<<GEAR_FAN_PIN);
-		}else{
-			fan = 1;
-			GEAR_PORT |= (1<<GEAR_FAN_PIN);
 		}
 
 		if( heater ){
 			GEAR_PORT |= (1<<GEAR_HEATER_PIN);
-			}else{
+		}else{
 			GEAR_PORT &= ~(1<<GEAR_HEATER_PIN);
 		}
 		dtostrf(destTemperature, 4, 1, strDestTemperature);
+		for(uint8_t i = 0; i <= 3; i++) USART_Transmit(strDestTemperature[i]);
+		USART_Transmit(20);
 		
 		strTime[0] = '0' + hours/10;
 		strTime[1] = '0' + hours%10;
@@ -256,6 +403,10 @@ int main(void)
 		strTime[3] = '0' + minutes/10;
 		strTime[4] = '0' + minutes%10;
 		strTime[5] = 0;
+
+		for(uint8_t i = 0; i <= 4; i++) USART_Transmit(strTime[i]);
+		USART_Transmit(20);
+		USART_Transmit(10);
 		
     	DISPLAY_CS_PORT &= ~(1<<DISPLAY_CS_PIN);
 		u8g2_FirstPage(&u8g2);
@@ -277,7 +428,7 @@ int main(void)
 			if( fan != 0 ){
 				u8g2_DrawStr(&u8g2, 86, 64, "\x4f");
 			}
-			if( level == 0 ){
+			if( level != 0 ){
 				u8g2_DrawStr(&u8g2, 110, 64, "\x4c");
 			}
 						

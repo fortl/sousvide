@@ -177,6 +177,6 @@ float max31865_temperature(void) {
   return temp;
 }
 
-uint8_t readFault(void) {
+uint8_t max31865_readFault(void) {
   return readRegister8(MAX31856_FAULTSTAT_REG);
 }

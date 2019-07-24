@@ -23,6 +23,7 @@ double max31865_temperature(void);
 uint16_t readRTD (void);
 void max31865_setup(void);
 double max31865_plus_temperature(void);
+uint8_t max31865_readFault(void);
 
 /*==========================================*/
 /* C++ compatible */
