@@ -68,6 +68,13 @@ uint8_t EEMEM destSecontsEEMEM = 0;
 unsigned char hours = 0;
 unsigned char minutes = 0;
 unsigned char seconds = 0;
+uint8_t heater = 0;
+uint8_t fan    = 1;
+uint8_t level  = 0;
+	
+char strTemperature[5]     = {0};
+char strDestTemperature[5] = {0};
+char strTime[6] = {0};
 
 uint8_t buttonsCounters[BUTTON_LAST+1] = {0};
 
@@ -195,6 +202,43 @@ uint8_t u8x8_avr_gpio_and_delay(u8x8_t *u8x8, uint8_t msg, uint8_t arg_int, void
 	return 1;
 }
 
+void display(void)
+{
+	DISPLAY_CS_PORT &= ~(1<<DISPLAY_CS_PIN);
+	u8g2_FirstPage(&u8g2);
+	do
+	{
+		u8g2_SetDrawColor(&u8g2, 1);
+		u8g2_ClearBuffer(&u8g2);
+		u8g2_SetFont(&u8g2, u8g2_font_logisoso30_tn);
+		u8g2_DrawStr(&u8g2, 1, 35, strTemperature);
+		u8g2_SetFont(&u8g2, u8g2_font_crox4hb_tn );
+		u8g2_DrawStr(&u8g2, 85, 21, strDestTemperature);
+
+		u8g2_DrawStr(&u8g2, 2, 64, strTime);
+
+		u8g2_SetFont(&u8g2, u8g2_font_open_iconic_embedded_2x_t );
+		if( heater != 0 ){
+			u8g2_DrawStr(&u8g2, 65, 64, "\x43");
+		}
+		if( fan != 0 ){
+			u8g2_DrawStr(&u8g2, 86, 64, "\x4f");
+		}
+		if( level != 0 ){
+			u8g2_DrawStr(&u8g2, 110, 64, "\x4c");
+		}
+		    	
+		u8g2_DrawLine(&u8g2, 3, 40, 125, 40);
+		u8g2_DrawLine(&u8g2, 72, 2, 78, 20);
+		u8g2_DrawLine(&u8g2, 72, 38, 78, 20);
+		u8g2_SendBuffer(&u8g2);
+		//u8g2_SetDrawColor(&u8g2, 0);
+		//u8g2_DrawBox(&u8g2, 80, 18, 90, 10);
+	} while (u8g2_NextPage(&u8g2));
+	DISPLAY_CS_PORT |= (1<<DISPLAY_CS_PIN);
+
+}
+
 ISR(TIMER1_OVF_vect)
 {	
 	if(seconds > 0){
@@ -208,6 +252,8 @@ ISR(TIMER1_OVF_vect)
 			if(hours > 0) hours -= 1;
 		}
 	}
+
+	display();
 	eeprom_update_byte(&destSecontsEEMEM, seconds);
 	eeprom_update_byte(&destMinutesEEMEM, minutes);
 	eeprom_update_byte(&destHoursEEMEM, hours);
@@ -217,7 +263,7 @@ ISR(TIMER1_OVF_vect)
 
 ISR(USART_RXC_vect)
 {
-	if (command_ready) return;
+	if (command_ready == 1) return;
 	// Get data from the USART in register
 	data_in[data_count] = UDR;
 
@@ -240,13 +286,6 @@ int main(void)
 	float temperatureJumpInterval;
 	uint8_t timeJumpInterval;
 	float destTemperature = eeprom_read_float(&destTemperatureEEMEM);
-	
-	uint8_t heater = 0;
-	uint8_t fan    = 1;
-	uint8_t level  = 0;
-	char strTemperature[5]     = {0};
-	char strDestTemperature[5] = {0};
-	char strTime[6] = {0};
 	
 	seconds = eeprom_read_byte(&destSecontsEEMEM);
 	minutes = eeprom_read_byte(&destMinutesEEMEM);
@@ -293,6 +332,7 @@ int main(void)
 					destTemperature = (float)(command_in[2] - '0')*10;
 					destTemperature += (command_in[3] - '0');
 					destTemperature += (float)(command_in[5] - '0')/10;
+					eeprom_update_float(&destTemperatureEEMEM, destTemperature);
 				}else if ( command_in[1] == 'S' ){
 					hours   = (command_in[2] - '0')*10 + (command_in[3] - '0');
 					minutes = (command_in[5] - '0')*10 + (command_in[6] - '0');
@@ -407,38 +447,6 @@ int main(void)
 		for(uint8_t i = 0; i <= 4; i++) USART_Transmit(strTime[i]);
 		USART_Transmit(20);
 		USART_Transmit(10);
-		
-    	DISPLAY_CS_PORT &= ~(1<<DISPLAY_CS_PIN);
-		u8g2_FirstPage(&u8g2);
-		do 
-		{			
-			u8g2_SetDrawColor(&u8g2, 1);
-			u8g2_ClearBuffer(&u8g2); 
-			u8g2_SetFont(&u8g2, u8g2_font_logisoso30_tn);
-			u8g2_DrawStr(&u8g2, 1, 35, strTemperature);
-			u8g2_SetFont(&u8g2, u8g2_font_crox4hb_tn );
-			u8g2_DrawStr(&u8g2, 85, 21, strDestTemperature);
-
-			u8g2_DrawStr(&u8g2, 2, 64, strTime);
-
-			u8g2_SetFont(&u8g2, u8g2_font_open_iconic_embedded_2x_t );
-			if( heater != 0 ){
-				u8g2_DrawStr(&u8g2, 65, 64, "\x43");
-			}
-			if( fan != 0 ){
-				u8g2_DrawStr(&u8g2, 86, 64, "\x4f");
-			}
-			if( level != 0 ){
-				u8g2_DrawStr(&u8g2, 110, 64, "\x4c");
-			}
-						
-			u8g2_DrawLine(&u8g2, 3, 40, 125, 40);
-			u8g2_DrawLine(&u8g2, 72, 2, 78, 20);
-			u8g2_DrawLine(&u8g2, 72, 38, 78, 20);
-			u8g2_SendBuffer(&u8g2);
-			//u8g2_SetDrawColor(&u8g2, 0);
-			//u8g2_DrawBox(&u8g2, 80, 18, 90, 10);
-		} while (u8g2_NextPage(&u8g2));
-	    DISPLAY_CS_PORT |= (1<<DISPLAY_CS_PIN);
+		_delay_us(500);
 	}
 }
