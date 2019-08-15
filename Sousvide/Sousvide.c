@@ -38,8 +38,8 @@
 #define BUTTONS_DDR DDRD
 #define BUTTONS_PIN PIND
 #define BUTTON_FIRST 2
-#define BUTTON_RU 2
-#define BUTTON_RD 3
+#define BUTTON_RU 3
+#define BUTTON_RD 2
 #define BUTTON_LD 4
 #define BUTTON_LU 5
 #define BUTTON_LAST 5
@@ -100,7 +100,24 @@ void USART_Transmit( unsigned char data ) //Функция отправки да
 {
 	while ( !(UCSRA & (1<<UDRE)) ); //Ожидание опустошения буфера приема
 	UDR = data; //Начало передачи данных
-}unsigned char USART_Read(void){	while( !USART_CAN_READ );	return USART_READ;}void copy_command ()
+}unsigned char USART_Read(void){	while( !USART_CAN_READ );	return USART_READ;}void setBluetoothName(void){	_delay_us(500);
+	USART_Transmit('A');
+	USART_Transmit('T');
+	USART_Transmit('+');
+	USART_Transmit('N');
+	USART_Transmit('A');
+	USART_Transmit('M');
+	USART_Transmit('E');
+	USART_Transmit('S');
+	USART_Transmit('o');
+	USART_Transmit('u');
+	USART_Transmit('s');
+	USART_Transmit('v');
+	USART_Transmit('i');
+	USART_Transmit('d');
+	USART_Transmit('e');
+	USART_Transmit(13);
+		_delay_us(500); }void copy_command ()
 {
 	// The USART might interrupt this - don't let that happen!
 	ATOMIC_BLOCK(ATOMIC_FORCEON) {
@@ -224,7 +241,7 @@ void display(void)
 		if( fan != 0 ){
 			u8g2_DrawStr(&u8g2, 86, 64, "\x4f");
 		}
-		if( level != 0 ){
+		if( level != 0 || (seconds & 1) == 0 ){
 			u8g2_DrawStr(&u8g2, 110, 64, "\x4c");
 		}
 		    	
@@ -282,7 +299,7 @@ int main(void)
 {	
 	uint8_t sensorFault = -1;
 	float temperature = 0;
-	uint8_t temperatureUpdateTime = 0;
+	uint8_t secondsCounterTime = 0;
 	float temperatureJumpInterval;
 	uint8_t timeJumpInterval;
 	float destTemperature = eeprom_read_float(&destTemperatureEEMEM);
@@ -339,29 +356,67 @@ int main(void)
 				}
 			}
 		}
-		/* _delay_us(500);
-		USART_Transmit('A');
-		USART_Transmit('T');
-		USART_Transmit('+');
-		USART_Transmit('N');
-		USART_Transmit('A');
-		USART_Transmit('M');
-		USART_Transmit('E');
-		USART_Transmit('S');
-		USART_Transmit('o');
-		USART_Transmit('u');
-		USART_Transmit('s');
-		USART_Transmit('v');
-		USART_Transmit('i');
-		USART_Transmit('d');
-		USART_Transmit('e');
-		USART_Transmit(13);
-		_delay_us(500); */
 		
-		if( seconds != temperatureUpdateTime ){
+		for(uint8_t i = BUTTON_FIRST; i <= BUTTON_LAST; i++){
+			buttonsCounters[i] = (BUTTONS_PIN & (1<<i)) == 0
+			? (buttonsCounters[i] < 255 ? buttonsCounters[i]+1 : 255)
+			: 0;
+		}		
+		
+		if( seconds != secondsCounterTime ){
 			sensorFault = max31865_readFault();
 			temperature = max31865_temperature();
-			temperatureUpdateTime = seconds;
+			if( buttonsCounters[BUTTON_RU] > 0 ){
+				if( buttonsCounters[BUTTON_RU] < 20 ) {
+					temperatureJumpInterval = .1;
+				}else if( buttonsCounters[BUTTON_RU] < 40 ){
+					temperatureJumpInterval = 1;
+				}else if( buttonsCounters[BUTTON_RU] < 100 ){
+					temperatureJumpInterval = 5;
+				}else{
+					temperatureJumpInterval = 10;
+				}
+				destTemperature = round((destTemperature / temperatureJumpInterval) + 1)*temperatureJumpInterval;
+				if( destTemperature > 99 ) destTemperature = 99;
+				eeprom_update_float(&destTemperatureEEMEM, destTemperature);
+			}
+			if( buttonsCounters[BUTTON_RD] > 0 ){
+				if( buttonsCounters[BUTTON_RD] < 20 ) {
+					temperatureJumpInterval = .1;
+				}else if( buttonsCounters[BUTTON_RD] < 40 ){
+					temperatureJumpInterval = 1;
+				}else if( buttonsCounters[BUTTON_RD] < 100 ){
+					temperatureJumpInterval = 5;
+				}else{
+					temperatureJumpInterval = 10;
+				}
+				
+				destTemperature = round((destTemperature / temperatureJumpInterval) - 1 )*temperatureJumpInterval;
+				if( destTemperature < 10 ) destTemperature = 10;
+				eeprom_update_float(&destTemperatureEEMEM, destTemperature);
+			}
+			if( buttonsCounters[BUTTON_LU] > 0 ){
+				minutes += buttonsCounters[BUTTON_LU] > 40 ? 30 : 10;
+				if( minutes > 60 ){
+					minutes -=60;
+					hours += 1;
+					if( hours > 99 ) hours = 99;
+				}
+			}
+			if( buttonsCounters[BUTTON_LD] > 0 ){
+				timeJumpInterval = buttonsCounters[BUTTON_LD] > 4 ? 30 : 10;
+				if( minutes >= timeJumpInterval ){
+					minutes -= timeJumpInterval;
+					}else{
+					if( hours > 0 ){
+						minutes += 60 - timeJumpInterval;
+						hours -= 1;
+						}else{
+						minutes = 0;
+					}
+				}
+			}
+			secondsCounterTime = seconds;
 		}
 		if( sensorFault ){
 			strcpy(strTemperature, "---");
@@ -373,50 +428,7 @@ int main(void)
 		for(uint8_t i = 0; i <= 3; i++) USART_Transmit(strTemperature[i]);
 		USART_Transmit(20);
 		
-		for(uint8_t i = BUTTON_FIRST; i <= BUTTON_LAST; i++){
-			buttonsCounters[i] = (BUTTONS_PIN & (1<<i)) == 0 
-				? (buttonsCounters[i] < 255 ? buttonsCounters[i]+1 : 255) 
-				: 0;
-		}
-		if( buttonsCounters[BUTTON_RU] > 0 ){
-			temperatureJumpInterval = buttonsCounters[BUTTON_RU] > 4 
-				? ( buttonsCounters[BUTTON_RU] > 8 ? 5 : 1) 
-				: .1;
-			destTemperature = round(destTemperature / temperatureJumpInterval + 1)*temperatureJumpInterval;
-			if( destTemperature > 99 ) destTemperature = 99;
-			eeprom_update_float(&destTemperatureEEMEM, destTemperature);
-		}
-		if( buttonsCounters[BUTTON_RD] > 0 ){
-			temperatureJumpInterval = buttonsCounters[BUTTON_RD] > 4
-				? ( buttonsCounters[BUTTON_RD] > 8 ? 5 : 1)
-				: .1;
-			destTemperature = round(destTemperature / temperatureJumpInterval - 1 )*temperatureJumpInterval;
-			if( destTemperature < 10 ) destTemperature = 10;
-			eeprom_update_float(&destTemperatureEEMEM, destTemperature);
-		}
-		heater = destTemperature > temperature ? 1 : 0;
-
-		if( buttonsCounters[BUTTON_LU] > 0 ){
-			minutes += buttonsCounters[BUTTON_LU] > 4 ? 30 : 10;
-			if( minutes > 60 ){
-				minutes -=60;
-				hours += 1;
-				if( hours > 99 ) hours = 99;	
-			}
-		}
-		if( buttonsCounters[BUTTON_LD] > 0 ){
-			timeJumpInterval = buttonsCounters[BUTTON_LD] > 4 ? 30 : 10;
-			if( minutes >= timeJumpInterval ){
-				minutes -= timeJumpInterval;
-			}else{
-				if( hours > 0 ){
-					minutes += 60 - timeJumpInterval;
-					hours -= 1;
-				}else{
-					minutes = 0;
-				}
-			}
-		}
+		heater = (destTemperature > temperature) && !sensorFault && temperature != 0 ? 1 : 0;
 		
 		level = LEVEL_VALUE;
 		if( level ){
@@ -447,6 +459,6 @@ int main(void)
 		for(uint8_t i = 0; i <= 4; i++) USART_Transmit(strTime[i]);
 		USART_Transmit(20);
 		USART_Transmit(10);
-		_delay_us(500);
+		_delay_us(50000);
 	}
 }
