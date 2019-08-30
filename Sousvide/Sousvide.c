@@ -47,11 +47,11 @@
 #define LEVEL_DDR DDRC
 #define LEVEL_PORT PORTC
 #define LEVEL_PIN 1
-#define LEVEL_VALUE PINC & (1<<LEVEL_PIN)
+#define LEVEL_VALUE PINC & (1<<LEVEL_PIN) ? 1 : 0
 
 #define GEAR_PORT PORTC
 #define GEAR_DDR DDRC
-#define GEAR_HEATER_PIN 2
+#define GEAR_HEATER_PIN 6
 #define GEAR_FAN_PIN 0
 
 #define USART_BAUDRATE 9600
@@ -304,26 +304,7 @@ int main(void)
 	uint8_t timeJumpInterval;
 	float destTemperature = eeprom_read_float(&destTemperatureEEMEM);
 	
-	seconds = eeprom_read_byte(&destSecontsEEMEM);
-	minutes = eeprom_read_byte(&destMinutesEEMEM);
-	hours   = eeprom_read_byte(&destHoursEEMEM);
-	
-	TCCR1B |= (1<<CS12)|(1<<CS10);//Предделитель = 1024
-	TIMSK |= (1<<TOIE1);//Разрешить прерывание по переполнению таймера 1
-	TCNT1 = 53817;
-	sei();
-	
-	USART_Init();
-
-	BUTTONS_PORT |= (1<<BUTTON_LU)|(1<<BUTTON_RU)|(1<<BUTTON_LD)|(1<<BUTTON_RD);
-	BUTTONS_DDR  &= ~((1<<BUTTON_LU)|(1<<BUTTON_RU)|(1<<BUTTON_LD)|(1<<BUTTON_RD));
-	
-	GEAR_PORT &= ~((1<<GEAR_FAN_PIN)|(1<<GEAR_HEATER_PIN));
-	GEAR_DDR |= (1<<GEAR_FAN_PIN)|(1<<GEAR_HEATER_PIN);
-	
-	LEVEL_PORT |= (1<<LEVEL_PIN);
-	LEVEL_DDR &= ~(1<<LEVEL_PIN);
-	
+	_delay_us(50000);
 	DISPLAY_CS_PORT &= ~(1<<DISPLAY_CS_PIN);
 	SPI_Init();
 	/*
@@ -339,6 +320,27 @@ int main(void)
 	u8g2_SetDisplayRotation(&u8g2, U8G2_R2);
 	DISPLAY_CS_PORT |= (1<<DISPLAY_CS_PIN);	
 	max31865_setup();
+	
+	seconds = eeprom_read_byte(&destSecontsEEMEM);
+	minutes = eeprom_read_byte(&destMinutesEEMEM);
+	hours   = eeprom_read_byte(&destHoursEEMEM);
+	
+	TCCR1B |= (1<<CS12)|(1<<CS10);//Предделитель = 1024
+	TIMSK |= (1<<TOIE1);//Разрешить прерывание по переполнению таймера 1
+	TCNT1 = 53817;
+	sei();
+	
+	USART_Init();
+
+	BUTTONS_PORT |= (1<<BUTTON_LU)|(1<<BUTTON_RU)|(1<<BUTTON_LD)|(1<<BUTTON_RD);
+	BUTTONS_DDR  &= ~((1<<BUTTON_LU)|(1<<BUTTON_RU)|(1<<BUTTON_LD)|(1<<BUTTON_RD));
+	
+	GEAR_PORT &= ~((1<<GEAR_FAN_PIN)|(1<<GEAR_HEATER_PIN));
+	//GEAR_PORT |= ((1<<GEAR_FAN_PIN)|(1<<GEAR_HEATER_PIN));
+	GEAR_DDR |= (1<<GEAR_FAN_PIN)|(1<<GEAR_HEATER_PIN);
+	
+	LEVEL_PORT |= (1<<LEVEL_PIN);
+	LEVEL_DDR &= ~(1<<LEVEL_PIN);
 		
 	while(1){
 		if (command_ready == 1) {
@@ -428,23 +430,30 @@ int main(void)
 		for(uint8_t i = 0; i <= 3; i++) USART_Transmit(strTemperature[i]);
 		USART_Transmit(20);
 		
-		heater = (destTemperature > temperature) && !sensorFault && temperature != 0 ? 1 : 0;
-		
 		level = LEVEL_VALUE;
-		if( level ){
+		heater = (level != 0) &&
+		 (!sensorFault && temperature != 0 && (destTemperature > temperature)) ? 1 : 0;
+		 
+		if( level != 0 ){
 			fan = 1;
 			GEAR_PORT |= (1<<GEAR_FAN_PIN);
+			//GEAR_PORT |= (1<<GEAR_HEATER_PIN);
 		}else{
-			heater = 0;
 			fan = 0;
 			GEAR_PORT &= ~(1<<GEAR_FAN_PIN);
+			//GEAR_PORT &= ~(1<<GEAR_HEATER_PIN);
 		}
+		USART_Transmit('0'+level);
+		USART_Transmit(20);
 
-		if( heater ){
+		if( heater != 0 ){
 			GEAR_PORT |= (1<<GEAR_HEATER_PIN);
 		}else{
 			GEAR_PORT &= ~(1<<GEAR_HEATER_PIN);
 		}
+		USART_Transmit('0'+level);
+		USART_Transmit(20);
+
 		dtostrf(destTemperature, 4, 1, strDestTemperature);
 		for(uint8_t i = 0; i <= 3; i++) USART_Transmit(strDestTemperature[i]);
 		USART_Transmit(20);
